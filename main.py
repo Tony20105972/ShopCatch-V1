@@ -1,5 +1,4 @@
 import os
-import asyncio
 import uvicorn
 from starlette.applications import Starlette
 from starlette.routing import Route, Mount
@@ -8,27 +7,27 @@ from starlette.responses import JSONResponse
 from mcp.server.sse import SseServerTransport
 from server import server
 
-# 1. SSE 트랜스포트 설정
+# 1. SSE 트랜스포트 생성
+# 최신 SDK에서는 생성 시점에 server를 주입하지 않고 handle_sse에서 주입하거나
+# 내부적으로 처리하도록 설계되어 있습니다.
 sse = SseServerTransport("/messages")
 
-# 2. 핸들러 구현 (v1.25.0 공식 메서드 connect_sse 사용)
+# 2. 핸들러 구현 (가장 안전한 방식)
 async def handle_sse(request):
-    """
-    mcp-python SDK 1.x 버전에서는 handle_sse 대신 
-    connect_sse(scope, receive, send, server)를 사용합니다.
-    """
-    return await sse.connect_sse(
-        request.scope, 
-        request.receive, 
-        request.send, 
+    # Starlette Request 객체에서 직접 scope, receive, send를 추출하여 전달합니다.
+    # 이것이 AttributeError: 'Request' object has no attribute 'send'를 고치는 유일한 방법입니다.
+    return await sse.handle_sse(
+        request.scope,
+        request._receive, # Starlette 내부 receive
+        request._send,    # Starlette 내부 send
         server
     )
 
 async def health_check(request):
-    """Render 배포 성공을 위한 루트 응답"""
+    """Render 배포 성공 확인용"""
     return JSONResponse({"status": "ok"})
 
-# 3. Starlette 앱 설정
+# 3. 앱 설정
 app = Starlette(
     routes=[
         Route("/", endpoint=health_check),
@@ -37,7 +36,7 @@ app = Starlette(
     ]
 )
 
-# ✅ Inspector 연결 필수: CORS 설정
+# ✅ Inspector 연결 필수: CORS
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -47,5 +46,4 @@ app.add_middleware(
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
-    # Render 환경 바인딩
-    uvicorn.run(app, host="0.0.0.0", port=port, proxy_headers=True)
+    uvicorn.run(app, host="0.0.0.0", port=port)
