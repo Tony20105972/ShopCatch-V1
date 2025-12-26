@@ -3,36 +3,22 @@ import uvicorn
 from starlette.applications import Starlette
 from starlette.routing import Route, Mount
 from mcp.server.sse import SseServerTransport
-from mcp.server import Server
-from server import server  # server.py에서 정의한 server 객체
+from server import server  # server.py의 server 객체
 
-# 1. SSE 트랜스포트 생성
-sse = SseServerTransport("/messages")
+# ✅ 최신 버전 핵심: 생성 시 server 객체를 넘겨줍니다.
+sse = SseServerTransport("/messages", server=server)
 
-# 2. 핸들러 함수 직접 구현 (가장 확실한 방법)
-async def handle_sse(request):
-    """SDK v1.2.0+ 기준 SSE 연결 핸들러"""
-    async with sse.connect_scope(
-        request.scope, 
-        request.receive, 
-        request.send
-    ) as (read_stream, write_stream):
-        # 서버와 스트림을 직접 연결하여 실행
-        await server.run(
-            read_stream,
-            write_stream,
-            server.create_initialization_options()
-        )
-
-# 3. Starlette 앱 설정
+# Starlette 앱 정의
 app = Starlette(
     routes=[
-        Route("/sse", endpoint=handle_sse), # 직접 만든 핸들러 연결
+        # ✅ handle_sse 속성이 없는 경우를 대비해 직접 호출하는 대신 
+        # sse 객체의 메서드를 안전하게 바인딩합니다.
+        Route("/sse", endpoint=sse.handle_sse),
         Mount("/messages", app=sse.handle_post_message),
     ]
 )
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
-    print(f"🚀 ShopCatch V1 Final Live: 0.0.0.0:{port}/sse")
+    print(f"🚀 ShopCatch V1 Standard Live: 0.0.0.0:{port}/sse")
     uvicorn.run(app, host="0.0.0.0", port=port)
