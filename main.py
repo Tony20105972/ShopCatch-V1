@@ -1,38 +1,42 @@
 import os
 import uvicorn
 from starlette.applications import Starlette
-from starlette.routing import Route, Mount
+from starlette.routing import Route
 from starlette.middleware.cors import CORSMiddleware
 from starlette.responses import JSONResponse
-from mcp.server.sse import SseServerTransport
+# 1.25.0 버전의 표준인 StreamableHttpServerTransport를 사용합니다.
+from mcp.server.streamable_http import StreamableHttpServerTransport
 from server import server # 님이 작성한 server.py의 server 객체
 
-# 1. 트랜스포트 생성
-sse = SseServerTransport("/messages")
+# 1. 트랜스포트 생성 (가장 깔끔한 최신 방식)
+transport = StreamableHttpServerTransport()
 
 async def health_check(request):
     return JSONResponse({"status": "ok"})
 
-# 2. 핵심: 1.0.0 버전은 'connect_scope'를 써서 스트림을 수동으로 연결해야 함
-async def handle_sse(scope, receive, send):
-    # 이 구문이 1.0.0 버전의 핵심입니다.
-    async with sse.connect_scope(scope, receive, send) as (read_stream, write_stream):
-        await server.run(
-            read_stream,
-            write_stream,
-            server.create_initialization_options()
-        )
+# 2. 통합 핸들러 (인스펙터의 모든 요청을 여기서 처리)
+async def handle_mcp(request):
+    """
+    인스펙터가 GET으로 오든 POST로 오든 이 함수가 
+    모든 스트림 연결(Streamable HTTP)을 자동으로 처리합니다.
+    """
+    return await transport.handle_request(
+        request.scope,
+        request.receive,
+        request.send,
+        server
+    )
 
+# 3. 앱 설정
 app = Starlette(
     routes=[
         Route("/", endpoint=health_check),
-        # /sse로 접속하면 handle_sse가 실행되며 연결 완료
-        Route("/sse", endpoint=handle_sse, methods=["GET", "POST"]),
-        # 클라이언트 응답을 받기 위한 필수 경로
-        Mount("/messages", app=sse.handle_post_message),
+        # 인스펙터가 /sse로 요청을 보내므로 경로를 /sse로 유지합니다.
+        Route("/sse", endpoint=handle_mcp, methods=["GET", "POST"]),
     ]
 )
 
+# CORS 설정 (이게 있어야 인스펙터 웹 UI에서 에러가 안 납니다)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -41,5 +45,6 @@ app.add_middleware(
 )
 
 if __name__ == "__main__":
+    # Render의 포트 환경변수를 따라갑니다.
     port = int(os.environ.get("PORT", 10000))
     uvicorn.run(app, host="0.0.0.0", port=port)
