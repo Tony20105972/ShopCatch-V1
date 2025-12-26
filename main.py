@@ -8,20 +8,25 @@ from mcp.server.sse import SseServerTransport
 from server import server
 
 # 1. SSE 트랜스포트 생성
-# 최신 SDK에서는 생성 시점에 server를 주입하지 않고 handle_sse에서 주입하거나
-# 내부적으로 처리하도록 설계되어 있습니다.
 sse = SseServerTransport("/messages")
 
-# 2. 핸들러 구현 (가장 안전한 방식)
+# 2. 핸들러 수정 (connect_scope 사용)
 async def handle_sse(request):
-    # Starlette Request 객체에서 직접 scope, receive, send를 추출하여 전달합니다.
-    # 이것이 AttributeError: 'Request' object has no attribute 'send'를 고치는 유일한 방법입니다.
-    return await sse.handle_sse(
-        request.scope,
-        request._receive, # Starlette 내부 receive
-        request._send,    # Starlette 내부 send
-        server
-    )
+    """
+    최신 SDK에서는 connect_scope를 사용하여 
+    scope, receive, send를 MCP 서버와 연결합니다.
+    """
+    async with sse.connect_scope(
+        request.scope, 
+        request._receive, 
+        request._send
+    ) as (read_stream, write_stream):
+        # MCP 서버를 실행하고 초기화 옵션을 전달합니다.
+        await server.run(
+            read_stream,
+            write_stream,
+            server.create_initialization_options()
+        )
 
 async def health_check(request):
     """Render 배포 성공 확인용"""
@@ -31,12 +36,14 @@ async def health_check(request):
 app = Starlette(
     routes=[
         Route("/", endpoint=health_check),
-        Route("/sse", endpoint=handle_sse, methods=["GET", "POST"]),
+        # 클라이언트가 SSE 연결을 시작하는 엔드포인트
+        Route("/sse", endpoint=handle_sse), 
+        # 클라이언트가 서버로 메시지를 보내는 엔드포인트
         Mount("/messages", app=sse.handle_post_message),
     ]
 )
 
-# ✅ Inspector 연결 필수: CORS
+# Inspector 연결을 위한 CORS 설정
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -45,5 +52,6 @@ app.add_middleware(
 )
 
 if __name__ == "__main__":
+    # Render 환경의 PORT 변수 대응
     port = int(os.environ.get("PORT", 10000))
     uvicorn.run(app, host="0.0.0.0", port=port)
