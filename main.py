@@ -13,18 +13,13 @@ sse = SseServerTransport("/messages")
 async def health_check(request):
     return JSONResponse({"status": "ok"})
 
-# 2. 핸들러: handle_sse 대신 connect_sse를 사용합니다.
-async def handle_sse(request):
+# 2. 핵심 수정: Starlette Request를 거치지 않고 ASGI raw 함수로 처리
+async def handle_sse(scope, receive, send):
     """
-    1.25.0 버전에서는 connect_sse 메서드를 통해 
-    scope, receive, send를 server와 연결합니다.
+    Starlette이 request 객체를 만들어서 넘겨주기 전 단계(scope, receive, send)에서
+    직접 connect_sse를 호출해야 에러가 나지 않습니다.
     """
-    async with sse.connect_sse(
-        request.scope, 
-        request.receive, 
-        request.send
-    ) as (read_stream, write_stream):
-        # 서버와 스트림을 연결하여 실행합니다.
+    async with sse.connect_sse(scope, receive, send) as (read_stream, write_stream):
         await server.run(
             read_stream,
             write_stream,
@@ -35,6 +30,7 @@ async def handle_sse(request):
 app = Starlette(
     routes=[
         Route("/", endpoint=health_check),
+        # endpoint에 handle_sse 함수 자체를 넘겨 ASGI 방식으로 동작하게 합니다.
         Route("/sse", endpoint=handle_sse, methods=["GET", "POST"]),
         Mount("/messages", app=sse.handle_post_message),
     ]
