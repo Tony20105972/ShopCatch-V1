@@ -1,36 +1,36 @@
 import os
 import uvicorn
+import asyncio
 from starlette.applications import Starlette
 from starlette.routing import Route, Mount
 from starlette.middleware.cors import CORSMiddleware
 from starlette.responses import JSONResponse
 from mcp.server.sse import SseServerTransport
-from server import server
+from server import server # 작성하신 MCP 서버 객체
 
 # 1. SSE 트랜스포트 생성
 sse = SseServerTransport("/messages")
 
-# 2. 헬스체크
 async def health_check(request):
     return JSONResponse({"status": "ok"})
 
-# 3. 핵심: Starlette의 추상화를 한 단계 건너뛰고 ASGI 인터페이스로 직접 대응
-# 이렇게 하면 'AttributeError: Request object has no attribute send'를 완벽히 피합니다.
+# 2. 핵심 핸들러: 메서드 호출 대신 '스트림'을 직접 연결
 async def handle_sse(scope, receive, send):
-    # sse.handle_sse가 있든 없든, sse 객체 자체가 ASGI 앱 역할을 수행하도록 호출
-    # 버전 1.25.0 내외의 대부분의 MCP SDK는 이 호출 방식을 지원합니다.
-    if hasattr(sse, "handle_sse"):
-        await sse.handle_sse(scope, receive, send)
-    else:
-        # handle_sse 메서드가 없는 경우 객체 자체를 실행
-        await sse(scope, receive, send)
+    # sse.connect_scope를 통해 읽기/쓰기 스트림을 직접 뽑아냅니다.
+    # AttributeError를 피하기 위해 내부 구조를 직접 타격합니다.
+    async with sse.connect_scope(scope, receive, send) as (read_stream, write_stream):
+        # 뽑아낸 스트림을 MCP 서버의 run 메서드에 강제로 꽂아넣습니다.
+        await server.run(
+            read_stream,
+            write_stream,
+            server.create_initialization_options()
+        )
 
-# 4. 앱 설정
+# 3. 앱 설정
 app = Starlette(
     routes=[
         Route("/", endpoint=health_check),
-        # Route의 endpoint에 handle_sse를 직접 넣으면 
-        # Starlette는 자동으로 (scope, receive, send)를 인자로 넘겨줍니다.
+        # 핸들러 인자가 (scope, receive, send)이므로 Starlette이 ASGI로 인식합니다.
         Route("/sse", endpoint=handle_sse, methods=["GET", "POST"]),
         Mount("/messages", app=sse.handle_post_message),
     ]
