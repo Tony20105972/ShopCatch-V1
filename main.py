@@ -1,37 +1,34 @@
 import os
 import uvicorn
-import asyncio
 from starlette.applications import Starlette
 from starlette.routing import Route, Mount
 from starlette.middleware.cors import CORSMiddleware
 from starlette.responses import JSONResponse
 from mcp.server.sse import SseServerTransport
-from server import server # 작성하신 MCP 서버 객체
+from server import server # 님이 작성한 server.py의 server 객체
 
-# 1. SSE 트랜스포트 생성
+# 1. 트랜스포트 생성
 sse = SseServerTransport("/messages")
 
 async def health_check(request):
     return JSONResponse({"status": "ok"})
 
-# 2. 핵심 핸들러: 메서드 호출 대신 '스트림'을 직접 연결
+# 2. 핵심: 1.0.0 버전은 'connect_scope'를 써서 스트림을 수동으로 연결해야 함
 async def handle_sse(scope, receive, send):
-    # sse.connect_scope를 통해 읽기/쓰기 스트림을 직접 뽑아냅니다.
-    # AttributeError를 피하기 위해 내부 구조를 직접 타격합니다.
+    # 이 구문이 1.0.0 버전의 핵심입니다.
     async with sse.connect_scope(scope, receive, send) as (read_stream, write_stream):
-        # 뽑아낸 스트림을 MCP 서버의 run 메서드에 강제로 꽂아넣습니다.
         await server.run(
             read_stream,
             write_stream,
             server.create_initialization_options()
         )
 
-# 3. 앱 설정
 app = Starlette(
     routes=[
         Route("/", endpoint=health_check),
-        # 핸들러 인자가 (scope, receive, send)이므로 Starlette이 ASGI로 인식합니다.
+        # /sse로 접속하면 handle_sse가 실행되며 연결 완료
         Route("/sse", endpoint=handle_sse, methods=["GET", "POST"]),
+        # 클라이언트 응답을 받기 위한 필수 경로
         Mount("/messages", app=sse.handle_post_message),
     ]
 )
