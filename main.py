@@ -21,7 +21,7 @@ async def handle_sse(request):
 app = Starlette(
     routes=[
         Route("/sse", endpoint=handle_sse),  # 카카오 Play MCP가 연결할 주소
-        Mount("/messages", app=sse.handle_post_messages), # 메시지 통로
+        Mount("/messages", app=sse.handle_post_message), # 메시지 통로
     ]
 )
 
