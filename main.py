@@ -6,30 +6,24 @@ from starlette.middleware.cors import CORSMiddleware
 from mcp.server.sse import SseServerTransport
 from server import server
 
-# 1. SSE 트랜스포트 설정
+# 1. SSE 트랜스포트 생성
 sse = SseServerTransport("/messages")
 
-# 2. 핸들러 구현 (가장 안전한 방어적 코드)
+# 2. 핸들러 함수: SDK의 handle_sse를 직접 연결
 async def handle_sse(request):
-    # sse.handle_sse가 있으면 그것을 사용 (최신 SDK 표준)
-    if hasattr(sse, "handle_sse"):
-        return await sse.handle_sse(request)
-    
-    # 만약 없다면, 수동으로 scope 연결 (구버전 대응)
-    # 1.25.0 이상에서는 보통 sse.scope 또는 sse.handle_sse를 기대합니다.
-    async with sse.scope(request.scope, request.receive, request.send) as (read, write):
-        await server.run(read, write, server.create_initialization_options())
+    # sse.handle_sse는 Starlette의 Request를 인자로 받아 처리하는 표준 메서드입니다.
+    return await sse.handle_sse(request)
 
 # 3. Starlette 앱 설정
 app = Starlette(
     routes=[
-        # GET/POST 모두 허용 (Inspector 및 카카오 대응)
+        # Inspector 연결을 위해 GET, POST 모두 허용
         Route("/sse", endpoint=handle_sse, methods=["GET", "POST"]),
         Mount("/messages", app=sse.handle_post_message),
     ]
 )
 
-# ✅ Inspector 테스트를 위한 CORS 설정 (이게 없으면 Inspector가 거부함)
+# ✅ Inspector(브라우저) 연결을 위한 필수 CORS 설정
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -37,7 +31,17 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# 4. 서버 기동 시 MCP 엔진과 트랜스포트 결합
+@app.on_event("startup")
+async def startup():
+    # 백그라운드에서 MCP 서버를 구동하여 SSE 스트림과 연결
+    import asyncio
+    asyncio.create_task(server.run(
+        sse.read_stream,
+        sse.write_stream,
+        server.create_initialization_options()
+    ))
+
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
-    print(f"🚀 ShopCatch V1 Standard Live: http://0.0.0.0:{port}/sse")
     uvicorn.run(app, host="0.0.0.0", port=port)
