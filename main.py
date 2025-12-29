@@ -18,26 +18,34 @@ load_dotenv()
 # 1. 트랜스포트 설정
 sse_transport = SseServerTransport("/mcp")
 
-# 2. 통합 핸들러 (ASGI 연결 인터페이스 직접 추출)
+# 2. 통합 핸들러
 async def handle_everything(request):
     try:
-        # Starlette Request에서 ASGI의 기본 통신 인터페이스를 직접 가져옵니다.
-        # 이것이 'Request object has no attribute send' 에러를 막는 핵심입니다.
-        scope = request.scope
-        receive = request.receive
-        send = scope.get("ask") or request._send # Starlette의 내부 send 인터페이스 활용
-
         if request.method == "POST":
             # HTTP POST 메시지 처리
-            await sse_transport.handle_post_message(scope, receive, request._send)
-        else:
-            # GET 요청 시 SSE 연결 및 MCP 서버 실행
-            # mcp_server.run은 이 인터페이스들을 통해 클라이언트와 대화합니다.
-            await mcp_server.run(
-                receive,
-                request._send,
-                sse_transport.handle_sse
+            await sse_transport.handle_post_message(
+                request.scope, 
+                request.receive, 
+                request._send
             )
+        elif request.method == "GET":
+            # 최신 버전 mcp 라이브러리 인터페이스: create_sse_handler 사용
+            sse_handler = await sse_transport.create_sse_handler(
+                request.scope, 
+                request.receive, 
+                request._send
+            )
+            # mcp_server.run에 핸들러와 통신 로직 연결
+            await mcp_server.run(
+                request.receive,
+                request._send,
+                sse_handler
+            )
+        elif request.method == "HEAD":
+            # 헬스체크용 (Render용)
+            from starlette.responses import Response
+            return Response(status_code=200)
+
     except Exception as e:
         logger.error(f"Error handling request: {str(e)}")
         from starlette.responses import JSONResponse
