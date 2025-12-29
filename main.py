@@ -1,18 +1,18 @@
 import os
 import uvicorn
 from starlette.middleware.cors import CORSMiddleware
-from starlette.responses import Response
+from starlette.responses import JSONResponse
 from mcp.server.sse import SseServerTransport
 from server import server
 
-# 1. SSE 트랜스포트 설정
+# 1. 트랜스포트 설정
 sse = SseServerTransport("/messages")
 
 async def app(scope, receive, send):
     path = scope.get("path", "")
     method = scope.get("method", "")
 
-    # (1) PlayMCP 연결 경로: 어떤 경우에도 일반 JSON을 리턴하지 않음
+    # (1) /sse 경로: PlayMCP의 메인 통로
     if path == "/sse":
         if method == "GET":
             async with sse.connect_sse(scope, receive, send) as (read_stream, write_stream):
@@ -22,29 +22,25 @@ async def app(scope, receive, send):
                     server.create_initialization_options()
                 )
         elif method == "POST":
-            # 세션 ID가 없으면 그냥 빈 응답(204)을 보내서 프록시가 에러로 인식하지 않게 함
+            # 세션 ID가 없는 POST 요청이 들어오면 에러 대신 '빈 성공' JSON을 보냄
             query_params = scope.get("query_string", b"").decode()
             if "session_id" not in query_params:
-                response = Response(status_code=204) # No Content
+                # PlayMCP가 기대하는 최소한의 JSON 구조
+                response = JSONResponse({}, status_code=200)
                 await response(scope, receive, send)
             else:
                 await sse.handle_post_message(scope, receive, send)
 
-    # (2) 메시지 처리 경로
+    # (2) /messages 경로: 데이터 전송 통로
     elif path.startswith("/messages"):
         await sse.handle_post_message(scope, receive, send)
 
-    # (3) 그 외 경로 (Render 헬스체크용): PlayMCP가 건드리지 않는 경로
+    # (3) 그 외 모든 경로: 무조건 JSON으로 대답 (Content-Type 에러 방지)
     else:
-        # 루트(/) 경로에서만 최소한의 응답
-        if path == "/":
-            response = Response("ok", media_type="text/plain")
-            await response(scope, receive, send)
-        else:
-            response = Response(status_code=404)
-            await response(scope, receive, send)
+        response = JSONResponse({"status": "ok"}, status_code=200)
+        await response(scope, receive, send)
 
-# 3. CORS 설정 (PlayMCP 프록시 통과 필수)
+# 3. CORS 설정 (반드시 모든 헤더 허용)
 final_app = CORSMiddleware(
     app,
     allow_origins=["*"],
