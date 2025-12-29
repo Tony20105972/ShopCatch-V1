@@ -1,74 +1,45 @@
 import os
-import json
 import logging
-import httpx
+import uvicorn
 from dotenv import load_dotenv
 from starlette.applications import Starlette
-from starlette.routing import Route, Mount
-from starlette.responses import JSONResponse
-from mcp.server import Server
+from starlette.routing import Route
 from mcp.server.sse import SseServerTransport
+
+# server.py에서 업그레이드한 고성능 서버 객체 가져오기
+from server import server as mcp_server
 
 # 로깅 설정
 logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger("shopcatch-mcp")
+logger = logging.getLogger("shopcatch-main")
 
 load_dotenv()
 
-# 네이버 API 설정
-NAVER_CLIENT_ID = os.getenv("NAVER_CLIENT_ID")
-NAVER_CLIENT_SECRET = os.getenv("NAVER_CLIENT_SECRET")
+# 1. 트랜스포트 설정 (Streamable HTTP용)
+# 내부 경로는 /mcp로 지정하지만, handle_everything에서 모든 경로를 수용함
+sse_transport = SseServerTransport("/mcp")
 
-# 1. MCP 서버 초기화
-mcp_server = Server("shopcatch")
-# Streamable HTTP도 내부적으로는 SSE 전송 방식을 빌려 쓰되, 
-# 단일 엔드포인트에서 처리하도록 설정합니다.
-sse_transport = SseServerTransport("/mcp") # 이 경로는 내부 식별용입니다.
-
-@mcp_server.list_tools()
-async def handle_list_tools():
-    return [
-        {
-            "name": "recommend_and_search_products",
-            "description": "네이버 쇼핑 API 상품 검색",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "query": {"type": "string", "description": "검색어"},
-                    "display": {"type": "integer", "description": "결과 수", "default": 5}
-                },
-                "required": ["query"]
-            }
-        }
-    ]
-
-@mcp_server.call_tool()
-async def handle_call_tool(name, arguments):
-    if name == "recommend_and_search_products":
-        query = arguments.get("query")
-        display = arguments.get("display", 5)
-        headers = {"X-Naver-Client-Id": NAVER_CLIENT_ID, "X-Naver-Client-Secret": NAVER_CLIENT_SECRET}
-        async with httpx.AsyncClient() as client:
-            resp = await client.get("https://openapi.naver.com/v1/search/shop.json", headers=headers, params={"query": query, "display": display})
-            if resp.status_code == 200:
-                items = resp.json().get("items", [])
-                res = [f"상품: {i['title'].replace('<b>','').replace('</b>','')}\n가격: {i['lprice']}원\n링크: {i['link']}" for i in items]
-                return [{"type": "text", "text": "\n\n".join(res)}]
-    return [{"type": "text", "text": "에러 발생"}]
-
-# --- 핵심: 어떤 경로로 POST가 들어와도 처리하도록 통합 ---
-
+# 2. 통합 핸들러 (어떤 경로, 어떤 방식이든 다 받아줌)
 async def handle_everything(request):
-    """Inspector가 /sse로 찌르든 /mcp로 찌르든 다 받아줌"""
-    if request.method == "POST":
-        # Streamable HTTP의 핵심: POST 메시지 처리
-        await sse_transport.handle_post_message(request.scope, request.receive, request.send)
-    else:
-        # GET 요청은 연결 핸들러로
-        async with sse_transport.connect_scope(request.scope, request.receive, request.send) as scope:
-            await mcp_server.run(scope[0], scope[1], sse_transport.handle_sse)
+    """
+    Inspector나 클라이언트가 어떤 엔드포인트를 찔러도 
+    MCP 서버로 연결해주는 만능 게이트웨이
+    """
+    try:
+        if request.method == "POST":
+            # JSON-RPC 메시지 처리 (POST)
+            await sse_transport.handle_post_message(request.scope, request.receive, request.send)
+        else:
+            # SSE 연결 수립 (GET)
+            async with sse_transport.connect_scope(request.scope, request.receive, request.send) as scope:
+                # server.py의 고성능 로직 실행
+                await mcp_server.run(scope[0], scope[1], sse_transport.handle_sse)
+    except Exception as e:
+        logger.error(f"Error handling request: {str(e)}")
+        from starlette.responses import JSONResponse
+        return JSONResponse({"error": "Internal Server Error", "details": str(e)}, status_code=500)
 
-# 모든 경로를 handle_everything으로 연결
+# 3. 모든 루트를 handle_everything으로 라우팅 (404/405 방지)
 app = Starlette(
     routes=[
         Route("/", endpoint=handle_everything, methods=["GET", "POST"]),
@@ -77,7 +48,8 @@ app = Starlette(
     ]
 )
 
+# 4. 서버 실행
 if __name__ == "__main__":
-    import uvicorn
+    # Render 환경의 PORT 변수 우선 사용
     port = int(os.environ.get("PORT", 10000))
     uvicorn.run(app, host="0.0.0.0", port=port)
