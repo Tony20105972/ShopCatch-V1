@@ -15,21 +15,25 @@ logger = logging.getLogger("shopcatch-main")
 
 load_dotenv()
 
-# 1. 트랜스포트 설정 (Streamable HTTP 기반)
+# 1. 트랜스포트 설정
 sse_transport = SseServerTransport("/mcp")
 
-# 2. 통합 핸들러 (오류 원인이었던 connect_scope 제거 및 구조 최적화)
+# 2. 통합 핸들러 (Starlette request의 scope, receive, send를 정확히 추출)
 async def handle_everything(request):
     try:
+        # Starlette 핸들러에서 필요한 인자들을 추출합니다.
+        scope = request.scope
+        receive = request.receive
+        send = request.send
+
         if request.method == "POST":
             # HTTP POST를 통한 메시지 전달
-            await sse_transport.handle_post_message(request.scope, request.receive, request.send)
+            await sse_transport.handle_post_message(scope, receive, send)
         else:
-            # SSE 전송 방식을 이용한 연결 수립 (GET)
-            # mcp.server.run은 내부적으로 transport의 기능을 호출함
+            # GET 요청 시 SSE 연결 수립 및 MCP 서버 실행
             await mcp_server.run(
-                request.receive,
-                request.send,
+                receive,
+                send,
                 sse_transport.handle_sse
             )
     except Exception as e:
@@ -37,7 +41,7 @@ async def handle_everything(request):
         from starlette.responses import JSONResponse
         return JSONResponse({"error": str(e)}, status_code=500)
 
-# 3. 모든 루트 통합 (404, 405 방지)
+# 3. 모든 루트 통합
 app = Starlette(
     routes=[
         Route("/", endpoint=handle_everything, methods=["GET", "POST"]),
