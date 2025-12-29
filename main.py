@@ -5,8 +5,6 @@ from dotenv import load_dotenv
 from starlette.applications import Starlette
 from starlette.routing import Route
 from mcp.server.sse import SseServerTransport
-
-# server.py에서 고성능 서버 객체 가져오기
 from server import server as mcp_server
 
 # 로깅 설정
@@ -18,40 +16,33 @@ load_dotenv()
 # 1. 트랜스포트 설정
 sse_transport = SseServerTransport("/mcp")
 
-# 2. 통합 핸들러
+# 2. 통합 핸들러 (라이브러리 내부 메서드 의존성 제거)
 async def handle_everything(request):
     try:
-        if request.method == "POST":
-            # HTTP POST 메시지 처리
-            await sse_transport.handle_post_message(
-                request.scope, 
-                request.receive, 
-                request._send
-            )
-        elif request.method == "GET":
-            # 최신 버전 mcp 라이브러리 인터페이스: create_sse_handler 사용
-            sse_handler = await sse_transport.create_sse_handler(
-                request.scope, 
-                request.receive, 
-                request._send
-            )
-            # mcp_server.run에 핸들러와 통신 로직 연결
-            await mcp_server.run(
-                request.receive,
-                request._send,
-                sse_handler
-            )
-        elif request.method == "HEAD":
-            # 헬스체크용 (Render용)
+        # HEAD 요청은 Render 헬스체크용으로 즉시 응답
+        if request.method == "HEAD":
             from starlette.responses import Response
             return Response(status_code=200)
+
+        if request.method == "POST":
+            # POST 메시지 처리
+            await sse_transport.handle_post_message(
+                request.scope, request.receive, request._send
+            )
+        else:
+            # GET 요청 시: sse_transport.connect_scope를 사용해야 합니다.
+            # 이 메서드가 최신 mcp 라이브러리의 표준 연결 방식입니다.
+            async with sse_transport.connect_scope(
+                request.scope, request.receive, request._send
+            ) as (read_stream, write_stream):
+                await mcp_server.run(read_stream, write_stream, mcp_server.create_initialization_options())
 
     except Exception as e:
         logger.error(f"Error handling request: {str(e)}")
         from starlette.responses import JSONResponse
         return JSONResponse({"error": str(e)}, status_code=500)
 
-# 3. 모든 루트 통합
+# 3. 라우팅 설정
 app = Starlette(
     routes=[
         Route("/", endpoint=handle_everything, methods=["GET", "POST", "HEAD"]),
