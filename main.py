@@ -1,53 +1,63 @@
 import os
 import logging
 import uvicorn
+import anyio
 from dotenv import load_dotenv
 from starlette.applications import Starlette
 from starlette.routing import Route
+from starlette.responses import StreamingResponse, Response
 from mcp.server.sse import SseServerTransport
 from server import server as mcp_server
 
 # 로깅 설정
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("shopcatch-main")
-
 load_dotenv()
 
-# 1. 트랜스포트 설정
-sse_transport = SseServerTransport("/mcp")
+# Transport 초기화 (PlayMCP 요구사항에 맞춰 /messages 경로 설정)
+sse_transport = SseServerTransport("/messages")
 
-# 2. 통합 핸들러 (라이브러리 내부 메서드 의존성 제거)
-async def handle_everything(request):
-    try:
-        # HEAD 요청은 Render 헬스체크용으로 즉시 응답
-        if request.method == "HEAD":
-            from starlette.responses import Response
-            return Response(status_code=200)
-
-        if request.method == "POST":
-            # POST 메시지 처리
-            await sse_transport.handle_post_message(
-                request.scope, request.receive, request._send
+async def handle_stream(request):
+    """
+    HTTP 스트리밍 응답을 통해 MCP 데이터를 전송 (Streamable Transport)
+    """
+    async def event_generator():
+        # mcp-python-sdk의 connect_scope를 사용하여 스트림 브릿지 생성
+        async with sse_transport.connect_scope(
+            request.scope, 
+            request.receive, 
+            request._send
+        ) as (read_stream, write_stream):
+            # 서버 실행
+            await mcp_server.run(
+                read_stream,
+                write_stream,
+                mcp_server.create_initialization_options()
             )
-        else:
-            # GET 요청 시: sse_transport.connect_scope를 사용해야 합니다.
-            # 이 메서드가 최신 mcp 라이브러리의 표준 연결 방식입니다.
-            async with sse_transport.connect_scope(
-                request.scope, request.receive, request._send
-            ) as (read_stream, write_stream):
-                await mcp_server.run(read_stream, write_stream, mcp_server.create_initialization_options())
 
-    except Exception as e:
-        logger.error(f"Error handling request: {str(e)}")
-        from starlette.responses import JSONResponse
-        return JSONResponse({"error": str(e)}, status_code=500)
+    # Content-Type을 text/event-stream 또는 application/octet-stream으로 설정
+    # PlayMCP의 요구사항에 따라 적절한 타입이 필요할 수 있습니다.
+    return StreamingResponse(
+        event_generator(), 
+        media_type="text/event-stream" 
+    )
 
-# 3. 라우팅 설정
+async def handle_post(request):
+    """POST 요청 처리 (JSON-RPC)"""
+    await sse_transport.handle_post_message(
+        request.scope, 
+        request.receive, 
+        request._send
+    )
+
+async def health_check(request):
+    return Response("OK", status_code=200)
+
 app = Starlette(
     routes=[
-        Route("/", endpoint=handle_everything, methods=["GET", "POST", "HEAD"]),
-        Route("/sse", endpoint=handle_everything, methods=["GET", "POST"]),
-        Route("/mcp", endpoint=handle_everything, methods=["GET", "POST"]),
+        Route("/", endpoint=health_check, methods=["GET", "HEAD"]),
+        Route("/mcp", endpoint=handle_stream, methods=["GET"]),
+        Route("/messages", endpoint=handle_post, methods=["POST"]),
     ]
 )
 
