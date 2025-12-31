@@ -1,66 +1,63 @@
 import os
 import logging
 import uvicorn
-import anyio
 from dotenv import load_dotenv
 from starlette.applications import Starlette
-from starlette.routing import Route
-from starlette.responses import StreamingResponse, Response
+from starlette.routing import Route, Mount
+from starlette.responses import Response
 from mcp.server.sse import SseServerTransport
 from server import server as mcp_server
 
-# 로깅 설정
+# 로깅 설정: Render 로그에서 확인 가능하도록 설정
 logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger("shopcatch-main")
+logger = logging.getLogger("mcp-server")
 load_dotenv()
 
-# Transport 초기화 (PlayMCP 요구사항에 맞춰 /messages 경로 설정)
-sse_transport = SseServerTransport("/messages")
+# 1. SSE Transport 설정
+# PlayMCP와 Inspector는 연결 시 서버가 알려주는 'endpoint'로 POST를 보냅니다.
+sse = SseServerTransport("/messages")
 
-async def handle_stream(request):
+async def handle_sse(request):
     """
-    HTTP 스트리밍 응답을 통해 MCP 데이터를 전송 (Streamable Transport)
+    GET /mcp 경로로 들어오는 SSE 연결을 처리합니다.
     """
-    async def event_generator():
-        # mcp-python-sdk의 connect_scope를 사용하여 스트림 브릿지 생성
-        async with sse_transport.connect_scope(
-            request.scope, 
-            request.receive, 
-            request._send
-        ) as (read_stream, write_stream):
-            # 서버 실행
-            await mcp_server.run(
-                read_stream,
-                write_stream,
-                mcp_server.create_initialization_options()
-            )
+    async with sse.connect_scope(
+        request.scope, 
+        request.receive, 
+        request._send
+    ) as (read_stream, write_stream):
+        # MCP 서버를 실행하여 스트림을 브릿지합니다.
+        await mcp_server.run(
+            read_stream,
+            write_stream,
+            mcp_server.create_initialization_options()
+        )
 
-    # Content-Type을 text/event-stream 또는 application/octet-stream으로 설정
-    # PlayMCP의 요구사항에 따라 적절한 타입이 필요할 수 있습니다.
-    return StreamingResponse(
-        event_generator(), 
-        media_type="text/event-stream" 
-    )
-
-async def handle_post(request):
-    """POST 요청 처리 (JSON-RPC)"""
-    await sse_transport.handle_post_message(
+async def handle_messages(request):
+    """
+    POST /messages 경로로 들어오는 클라이언트의 JSON-RPC 메시지를 처리합니다.
+    """
+    await sse.handle_post_message(
         request.scope, 
         request.receive, 
         request._send
     )
 
 async def health_check(request):
-    return Response("OK", status_code=200)
+    """Render의 Health Check 및 브라우저 접속 확인용"""
+    return Response("MCP Server is Running", status_code=200)
 
+# 2. 애플리케이션 라우팅 구성
 app = Starlette(
     routes=[
-        Route("/", endpoint=health_check, methods=["GET", "HEAD"]),
-        Route("/mcp", endpoint=handle_stream, methods=["GET"]),
-        Route("/messages", endpoint=handle_post, methods=["POST"]),
+        Route("/", endpoint=health_check, methods=["GET"]),
+        Route("/mcp", endpoint=handle_sse, methods=["GET"]),
+        Route("/messages", endpoint=handle_messages, methods=["POST"]),
     ]
 )
 
 if __name__ == "__main__":
+    # Render는 PORT 환경변수를 할당하므로 이를 반드시 준수해야 합니다.
     port = int(os.environ.get("PORT", 10000))
+    logger.info(f"Starting MCP server on port {port}")
     uvicorn.run(app, host="0.0.0.0", port=port)
