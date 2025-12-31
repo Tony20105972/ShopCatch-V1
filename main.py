@@ -14,8 +14,15 @@ load_dotenv()
 
 sse = SseServerTransport("/messages")
 
+# [핵심] Starlette의 'NoneType' 에러를 방지하기 위한 더미 응답 클래스
+class DoneResponse(Response):
+    async def __call__(self, scope, receive, send):
+        # 이미 handle_post_message에서 응답을 보냈으므로 
+        # 여기서는 아무것도 전송하지 않고 종료합니다.
+        pass
+
 async def handle_sse(request):
-    """GET /mcp: SSE 연결용 (정상)"""
+    """GET /mcp: SSE 연결"""
     async with sse.connect_scope(
         request.scope, 
         request.receive, 
@@ -28,24 +35,23 @@ async def handle_sse(request):
         )
 
 async def handle_messages(request):
-    """POST /messages & /mcp: 메시지 수신용"""
-    # [체크 1] sse.handle_post_message가 직접 응답(send)을 처리합니다.
-    # [체크 2] 따라서 이 함수는 절대 아무것도 return 하면 안 됩니다 (None 유지).
-    # [체크 3] Starlette의 RuntimeError를 방지하기 위해 여기서 함수를 종료합니다.
+    """POST /messages 및 /mcp: 메시지 수신"""
+    # 1. MCP SDK가 메시지를 처리하고 응답을 보내게 합니다.
     await sse.handle_post_message(
         request.scope, 
         request.receive, 
         request._send
     )
+    # 2. [가장 중요] Starlette에게 '호출 가능한 응답 객체'를 리턴하여 
+    # TypeError를 방지합니다.
+    return DoneResponse()
 
 async def health_check(request):
     return Response("OK", status_code=200)
 
-# 라우팅 테이블
 routes = [
     Route("/", endpoint=health_check, methods=["GET"]),
     Route("/mcp", endpoint=handle_sse, methods=["GET"]),
-    # POST 엔드포인트에서 'return'을 제거한 handle_messages를 연결
     Route("/mcp", endpoint=handle_messages, methods=["POST"]),
     Route("/messages", endpoint=handle_messages, methods=["POST"]),
 ]
