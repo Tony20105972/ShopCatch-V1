@@ -4,56 +4,49 @@ import uvicorn
 from dotenv import load_dotenv
 from starlette.applications import Starlette
 from starlette.routing import Route
-from starlette.responses import Response
-from mcp.server.sse import SseServerTransport
-from server import server as mcp_server
+from starlette.responses import JSONResponse, Response
+from mcp.server import Server
+from mcp.types import JSONRPCResponse
+from server import server as mcp_server # 이미 정의된 MCP 서버 객체
 
+# 로깅 설정
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("mcp-server")
 load_dotenv()
 
-sse = SseServerTransport("/messages")
+async def handle_mcp_request(request):
+    """
+    POST /mcp: Streamable HTTP 방식 처리
+    세션(sessionId) 없이 JSON-RPC 요청을 직접 받아 처리합니다.
+    """
+    try:
+        # 1. 클라이언트로부터 JSON-RPC 요청 읽기
+        body = await request.json()
+        logger.info(f"Received request: {body.get('method')}")
 
-# [핵심] Starlette의 'NoneType' 에러를 방지하기 위한 더미 응답 클래스
-class DoneResponse(Response):
-    async def __call__(self, scope, receive, send):
-        # 이미 handle_post_message에서 응답을 보냈으므로 
-        # 여기서는 아무것도 전송하지 않고 종료합니다.
-        pass
-
-async def handle_sse(request):
-    """GET /mcp: SSE 연결"""
-    async with sse.connect_scope(
-        request.scope, 
-        request.receive, 
-        request._send
-    ) as (read_stream, write_stream):
-        await mcp_server.run(
-            read_stream,
-            write_stream,
-            mcp_server.create_initialization_options()
+        # 2. MCP 서버 객체를 통해 직접 요청 실행 (Stateless 방식)
+        # sse_transport 대신 서버의 직접 실행 로직을 사용합니다.
+        # mcp_server는 이미 정의된 Server 객체여야 합니다.
+        response = await mcp_server._router.handle_request(body, None)
+        
+        # 3. 처리 결과를 JSON으로 반환
+        return JSONResponse(response)
+        
+    except Exception as e:
+        logger.error(f"Error processing MCP request: {e}")
+        return JSONResponse(
+            {"jsonrpc": "2.0", "error": {"code": -32603, "message": str(e)}, "id": None},
+            status_code=500
         )
-
-async def handle_messages(request):
-    """POST /messages 및 /mcp: 메시지 수신"""
-    # 1. MCP SDK가 메시지를 처리하고 응답을 보내게 합니다.
-    await sse.handle_post_message(
-        request.scope, 
-        request.receive, 
-        request._send
-    )
-    # 2. [가장 중요] Starlette에게 '호출 가능한 응답 객체'를 리턴하여 
-    # TypeError를 방지합니다.
-    return DoneResponse()
 
 async def health_check(request):
     return Response("OK", status_code=200)
 
+# 가이드라인에 따른 라우팅 설정
 routes = [
     Route("/", endpoint=health_check, methods=["GET"]),
-    Route("/mcp", endpoint=handle_sse, methods=["GET"]),
-    Route("/mcp", endpoint=handle_messages, methods=["POST"]),
-    Route("/messages", endpoint=handle_messages, methods=["POST"]),
+    # Streamable HTTP는 주로 POST 하나로 통신합니다.
+    Route("/mcp", endpoint=handle_mcp_request, methods=["POST"]),
 ]
 
 app = Starlette(debug=True, routes=routes)
